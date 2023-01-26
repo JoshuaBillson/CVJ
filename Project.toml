@@ -1,0 +1,11 @@
+name = "CVJ"
+uuid = "f7e95ac8-696f-4c89-8b2c-c6f38f5349f1"
+authors = ["JoshuaBillson <jmbillson@outlook.com>"]
+version = "0.1.0"
+
+[deps]
+FileIO = "5789e2e9-d7fb-5bc7-8068-2c6fae9b9549"
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+Images = "916415d5-f1e6-5110-898d-aaa5f9f070e0"
+Metalhead = "dbeba491-748d-5e0e-a39e-b530a07fa0cc"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
