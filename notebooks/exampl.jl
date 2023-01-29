@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.19.12
+# v0.19.22
 
 using Markdown
 using InteractiveUtils
@@ -31,8 +31,8 @@ begin
 		classes::Vector{String}
 	end
 
-	function (l::DirectoryLabel)(paths::Vector{String})
-		map(x->splitpath(x)[end-1], paths) |> categorical
+	function (l::DirectoryLabel)(img_src::String)
+		return splitpath(x)[end-1]
 	end
 end;
 
@@ -42,37 +42,31 @@ begin
 		classes::Vector{String}
 	end
 
-	function (l::FileNameLabel)(paths::Vector{String})
-		labels = map(paths) do path
-			f = splitpath(path)[end]
-			for class in l.classes
-				if contains(f, class)
-					return class
-				end
+	function (l::FileNameLabel)(img_src::String)
+		for class in l.classes
+			if contains(f, class)
+				return class
 			end
 		end
-		return categorical(labels)
 	end
 end;
 
 # ╔═╡ 47a9bfb7-2ab1-46f2-a2cb-b50acadf254b
 begin
-	function get_data(data_src::String, label::DirectoryLabel, img::Type{T}) where {T<:AbstractImage}
-		
-		X = reduce(vcat, [readdir("$data_src/$c", join=true) for c in label.classes])
-		Y = label(X)
-		return T.(X), Y
+	function get_labels(images::Vector{String}, label::DirectoryLabel)
+		label(images) |> categorical
 		
 	end
 
-	function get_data(data_src::String, label::FileNameLabel, img::Type{T}) where {T<:AbstractImage}
-		
-		X = readdir(data_src, join=true)
-		Y = label(X)
-		return T.(X), Y
-		
+	function get_labels(images::Vector{String}, label::FileNameLabel)
+		label(images) |> categorical
 	end
 end;
+
+# ╔═╡ a42a470b-0f5b-4cf8-8ce8-252ce5f0aabb
+begin
+	imgs = readdir("../data")
+end
 
 # ╔═╡ 0202fab0-a589-415b-a819-d474a95f3f00
 struct Image <: AbstractImage
@@ -303,6 +297,30 @@ function n_channels(::Type{GrayImage})
 	return 1
 end;
 
+# ╔═╡ 877ba141-ee39-4564-b773-e704371c2001
+function load_data(img::GrayImage)
+	load(img.src) .|> Gray
+end;
+
+# ╔═╡ 5caf600a-3da4-4bf9-9901-aa7a59c7742f
+begin
+	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, aug=NoOp())
+		sample = Random.randperm(length(X))[1:16]
+		@pipe load_data.(X[sample], Y[sample]) |> 
+		map(x->x[1], _) |>
+		map(x->augment(x, aug), _) |>
+		map(x->imresize(x, (256, 256)), _) |>
+		mosaicview(_; fillvalue=1.0, npad=15, ncol=4, rowmajor=true) |> 
+		plot(_, axis=nothing, showaxis=true, margin=0Plots.mm, size=(2000, 2000))
+	end
+
+	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, dst::String, aug=NoOp())
+		plt = plot_sample(X, Y, aug)
+		savefig(plt, dst)
+		return plt
+	end
+end;
+
 # ╔═╡ f7210027-d1cc-4773-bb6c-de1c519c0172
 begin
 	function Base.getindex(X::DataPipeline{I}, i::AbstractArray{Int}) where {I}
@@ -360,30 +378,6 @@ md"""
 md"""
 # Test 1: Creating A New Image Type
 """
-
-# ╔═╡ 877ba141-ee39-4564-b773-e704371c2001
-function load_data(img::GrayImage)
-	load(img.src) .|> Gray
-end;
-
-# ╔═╡ 5caf600a-3da4-4bf9-9901-aa7a59c7742f
-begin
-	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, aug=NoOp())
-		sample = Random.randperm(length(X))[1:16]
-		@pipe load_data.(X[sample], Y[sample]) |> 
-		map(x->x[1], _) |>
-		map(x->augment(x, aug), _) |>
-		map(x->imresize(x, (256, 256)), _) |>
-		mosaicview(_; fillvalue=1.0, npad=15, ncol=4, rowmajor=true) |> 
-		plot(_, axis=nothing, showaxis=true, margin=0Plots.mm, size=(2000, 2000))
-	end
-
-	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, dst::String, aug=NoOp())
-		plt = plot_sample(X, Y, aug)
-		savefig(plt, dst)
-		return plt
-	end
-end;
 
 # ╔═╡ d7e8a71e-270b-455c-a391-52dc6c88ad85
 let
@@ -2078,6 +2072,7 @@ version = "1.4.1+0"
 # ╠═ff3e0e17-43e5-4594-842c-53330a015473
 # ╠═42661d75-e5f8-4078-a7c8-cb67ed67149b
 # ╠═47a9bfb7-2ab1-46f2-a2cb-b50acadf254b
+# ╠═a42a470b-0f5b-4cf8-8ce8-252ce5f0aabb
 # ╟─788f598c-cec7-4fb6-bbc9-43b5c3018469
 # ╠═0202fab0-a589-415b-a819-d474a95f3f00
 # ╠═7f052983-5e53-4d20-a34d-61cbfac31188
