@@ -19,108 +19,114 @@ using Augmentor
 # ╔═╡ bf6d61ed-5538-4a63-b03e-6e0ab7ebf651
 using Pipe: @pipe
 
+# ╔═╡ 0d1e373d-fee6-4fd9-b2bf-095c482adb62
+using Statistics
+
 # ╔═╡ ba5ebf0c-f6cc-4dfc-83a0-c48b8e54aa01
 import Flux, Metalhead
 
-# ╔═╡ a8f7cd6f-dfb9-468c-aace-acd048a5bcb9
-abstract type AbstractImage end;
-
-# ╔═╡ ff3e0e17-43e5-4594-842c-53330a015473
-begin
-	struct DirectoryLabel
-		classes::Vector{String}
-	end
-
-	function (l::DirectoryLabel)(img_src::String)
-		return splitpath(x)[end-1]
-	end
+# ╔═╡ 0b9c6bc6-9b44-4f64-a240-a6b7f70c7658
+function make_slices(x::Array{Float32, 3})
+	return Tuple(x[:,:,i] for i in eachindex(x[1,1,:]))
 end;
 
-# ╔═╡ 42661d75-e5f8-4078-a7c8-cb67ed67149b
-begin
-	struct FileNameLabel
-		classes::Vector{String}
-	end
-
-	function (l::FileNameLabel)(img_src::String)
-		for class in l.classes
-			if contains(f, class)
-				return class
-			end
-		end
-	end
+# ╔═╡ 8ef43f36-1eca-4067-95c5-8750603096aa
+function join_slices(x::Vararg{Matrix{Float32}})
+	cat(x..., dims=3)
 end;
 
-# ╔═╡ 47a9bfb7-2ab1-46f2-a2cb-b50acadf254b
+# ╔═╡ 914c9bd7-941f-4198-a211-16cda8e57e88
 begin
-	function get_labels(images::Vector{String}, label::DirectoryLabel)
-		label(images) |> categorical
-		
+	abstract type AbstractImage end
+
+	struct RGBImage <: AbstractImage
+		src::String
 	end
 
-	function get_labels(images::Vector{String}, label::FileNameLabel)
-		label(images) |> categorical
-	end
-end;
-
-# ╔═╡ a42a470b-0f5b-4cf8-8ce8-252ce5f0aabb
-begin
-	imgs = readdir("../data")
-end
-
-# ╔═╡ 0202fab0-a589-415b-a819-d474a95f3f00
-struct Image <: AbstractImage
-	src::String
-end
-
-# ╔═╡ 7f052983-5e53-4d20-a34d-61cbfac31188
-begin
 	function n_channels(t::Type{T}) where {T <: AbstractImage}
 		error("Error: You forgot to implement n_channels(t) for type $(T)!")
 	end
 
-	function n_channels(t::Type{Image})
+	function n_channels(t::Type{RGBImage})
 		return 3
 	end
-end;
-
-# ╔═╡ 97f2a69d-de48-4045-8d2f-e1059a57635b
-begin
-	function load_data(img::T) where {T <: AbstractImage}
+	
+	function load_image(img::T) where {T <: AbstractImage}
 		error("Error: You forgot to implement load_data(img, label) for type $(T)!")
 	end
 
-	function load_data(img::AbstractImage, label::CategoricalValue)
-		load_data(img), label
+	function load_image(img::RGBImage)::Array{Float32, 3}
+	    @pipe load(img.src) |>
+    	float32.(_) |>
+	    channelview |>
+    	permutedims(_, (3, 2, 1))
+	end
+end;
+
+# ╔═╡ c44c4efc-5ee0-49cf-9f90-358b42c234e6
+let
+	img = load("../data/cat/cat.100.jpg")
+end
+
+# ╔═╡ d36eb105-076e-48db-8329-a8af50c31b16
+begin
+	abstract type AbstractMask end
+
+	struct Mask 
+		src::String
 	end
 	
-	function load_data(img::Image)
-		load(img.src)
+	function load_label(l::CategoricalValue)
+		return Flux.onehot(l, levels(l)) .|> Float32
+	end
+
+	function load_label(l::Mask)
+		return Flux.onehot(l, levels(l))
 	end
 end;
 
-# ╔═╡ 8f07e284-72f9-4e09-ad0e-1227bc0e71be
+# ╔═╡ 75d7a895-34c6-49c0-8e03-7f0479f3e657
 begin
-	function channel_view(img::Matrix{<:Colorant})
-		return channelview(img)
+	function augment_data(x::Array{Float32, 3}, y::Vector{Float32}, aug)
+		x = @pipe make_slices(x) |> augment(_, aug) |> join_slices(_...)
+		return x, y
 	end
 
-	function channel_view(img::Matrix{<:Gray})
-		img = channelview(img)
-		return reshape(img, (1, size(img)...))
+	function augment_data(x::Array{Float32, 3}, y::Array{Float32, 3}, aug)
+		x_y = @pipe (make_slices(x)..., make_slices(y)...) |> augment(_, aug)
+		return join_slices(x_y[1:3]...), join_slices(x_y[4:6]...)
 	end
 end;
 
-# ╔═╡ 2862610e-8589-4b88-866b-1cd951b01b9b
-function preprocess_data(X::Matrix{<:Colorant}, Y::CategoricalValue, aug, sz)
-	@pipe augment(X, aug) |>
-	imresize(_, sz) |>
-	float32 |>
-	channel_view |>
-	permutedims(_, (3, 2, 1)) |>
-	reshape(_, (size(_)..., 1)) |>
-	(_, Flux.onehot(Y, levels(Y)))
+# ╔═╡ ff3e0e17-43e5-4594-842c-53330a015473
+function get_data(src::String, classes::Vector{String}, ::Type{T}) where {T <: AbstractImage}
+	files = reduce(vcat, readdir(joinpath(src, c), join=true) for c in classes)
+	labels = map(x->splitpath(x)[end-1], files) |> categorical
+	images = T.(files)
+	return images, labels
 end;
+
+# ╔═╡ 5caf600a-3da4-4bf9-9901-aa7a59c7742f
+# ╠═╡ disabled = true
+#=╠═╡
+begin
+	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, aug=NoOp())
+		sample = Random.randperm(length(X))[1:16]
+		@pipe load_data.(X[sample], Y[sample]) |> 
+		map(x->x[1], _) |>
+		map(x->augment(x, aug), _) |>
+		map(x->imresize(x, (256, 256)), _) |>
+		mosaicview(_; fillvalue=1.0, npad=15, ncol=4, rowmajor=true) |> 
+		plot(_, axis=nothing, showaxis=true, margin=0Plots.mm, size=(2000, 2000))
+	end
+
+	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, dst::String, aug=NoOp())
+		plt = plot_sample(X, Y, aug)
+		savefig(plt, dst)
+		return plt
+	end
+end;
+  ╠═╡ =#
 
 # ╔═╡ 53234c80-512d-4be2-9bfd-5c9ad953a91b
 begin
@@ -145,52 +151,124 @@ function Base.length(X::DataPipeline)
 	return length(X.imgs)
 end
 
+# ╔═╡ f7210027-d1cc-4773-bb6c-de1c519c0172
+begin
+	function Base.getindex(X::DataPipeline{I}, i::AbstractArray{Int}) where {I}
+		imgs = X.imgs[i]
+		labels = X.labels[i]
+		nclasses = levels(X.labels) |> length
+		aug = X.aug |> Resize(X.size...)
+    	xs = zeros(Float32, (X.size..., n_channels(I), length(i)))
+		ys = zeros(Float32, (nclasses, length(i)))
+    	for idx in 1:length(i)
+			x, y = augment_data(load_image(imgs[idx]), load_label(labels[idx]), aug)
+        	xs[:,:,:,idx] .= x
+			ys[:,idx] .= y
+    	end
+    	return xs |> Flux.gpu, ys |> Flux.gpu
+	end
+
+	function Base.getindex(X::DataPipeline, i::Int)
+		return X[[i]]
+	end
+end;
+
+# ╔═╡ 9676bdd1-d7f7-4066-812b-05d7e96ed12b
+md"""
+# Data Loading
+"""
+
+# ╔═╡ c18e2282-5489-4b96-bfbf-4596d6ed6c0c
+md"""
+# Define Pipeline
+"""
+
+# ╔═╡ 9a62027c-16ba-40ca-9ce5-5049d7e2e553
+md"""
+# Define Model
+"""
+
 # ╔═╡ 9de6e4bb-156d-483c-87af-11ba9bb4f7da
 abstract type AbstractModel end;
 
 # ╔═╡ 64d257df-b013-41eb-bbd4-2394729c5d92
-abstract type ImageClassifier <: AbstractModel end;
+abstract type AbstractClassifier <: AbstractModel end;
+
+# ╔═╡ f15a5f1f-6668-4e0e-afb9-eb54eeadb37c
+abstract type AbstractSegmentor <: AbstractModel end;
+
+# ╔═╡ 967ef01c-3a39-4ecd-ad1e-3f2b52ae72ff
+begin
+	function scitypes(::Type{<:AbstractClassifier})
+		return AbstractImage, CategoricalValue
+	end
+
+	function scitypes(::Type{<:AbstractSegmentor})
+		return AbstractImage, AbstractMask
+	end
+
+	function validate_model(::M, ::AbstractVector{I}, ::AbstractVector{L}) where {M<:AbstractModel, I, L}
+		f_type, l_type = scitypes(M)
+		scitypes_match = (I <: f_type) && (L <: l_type)
+		m="Model $M expects types ($f_type, $l_type), received types ($I, $L)!"
+		@assert scitypes_match m
+	end
+end;
 
 # ╔═╡ 8673e94b-bab3-42fe-bb42-b71ef78cd5a1
 begin
-	struct ResNetClassifier <: ImageClassifier
-		layers::Int
+	struct ResNetClassifier <: AbstractClassifier
+		n_layers::Int
+		n_classes::Int
 		pretrain::Bool
 		η::Float64
+		λ::Float64
 		epochs::Int
+		fine_tune::Bool
 	end
 
-	function ResNetClassifier(;layers=34, pretrain=true, η=1e-3, epochs=10)
-		return ResNetClassifier(layers, pretrain, η, epochs)
-	end
-end;
-
-# ╔═╡ 967ef01c-3a39-4ecd-ad1e-3f2b52ae72ff
-function scitypes(::Type{<:ImageClassifier})
-	return AbstractImage, CategoricalValue
-end;
-
-# ╔═╡ b4a4427c-5111-4547-9929-df1488545e2c
-function validate_model_types(::M, ::AbstractVector{I}, ::AbstractVector{L}) where {M<:AbstractModel, I, L}
-	feature_type, label_type = scitypes(M)
-	scitypes_match = (I <: feature_type) && (L <: label_type)
-	m="Model $M expects types ($feature_type, $label_type), received types ($I, $L)!"
-	@assert scitypes_match m
-end;
-
-# ╔═╡ 5a6e55ae-6448-43fa-ac5e-f27d6d94b002
-begin
-	function construct_classifier(model::T, nclasses) where {T <: ImageClassifier}
-		error("Error: construct_classifier(model) not defined for type $(T)!")
+	function ResNetClassifier(
+		;n_layers=34, 
+		n_classes=2, 
+		pretrain=true, 
+		η=1e-3, 
+		λ=0.0, 
+		epochs=10, 
+		fine_tune=false)
+		
+		return ResNetClassifier(n_layers, n_classes, pretrain, η, λ, epochs, fine_tune)
+		
 	end
 
-	function construct_classifier(model::ResNetClassifier, nclasses)
+	function construct_predictor(model::ResNetClassifier)
 		Flux.Chain(
-			Metalhead.ResNet(model.layers, pretrain=model.pretrain), 
-			Flux.Dense(1000, nclasses), 
+			Metalhead.ResNet(model.n_layers, pretrain=model.pretrain), 
+			Flux.Dense(1000, model.n_classes), 
 			Flux.softmax
 		)
 	end
+end;
+
+# ╔═╡ 1c96d9b4-dfa4-4980-8ddc-0398403144aa
+md"""
+# Define Machine
+"""
+
+# ╔═╡ e9998c93-7eeb-441e-8ddd-722434bb174c
+begin
+mutable struct FitResult
+	predictor
+	train::Vector{Int}
+	test::Vector{Int}
+	val::Vector{Int}
+	learning_curve::Vector{Float32}
+	validation_curve::Vector{Float32}
+end
+
+	function FitResult()
+		FitResult(nothing, [], [], [], [], [])
+	end
+	
 end;
 
 # ╔═╡ a1d98405-61db-4f03-8169-0ad2e95659bb
@@ -200,19 +278,92 @@ struct Machine{I<:AbstractImage, T, M<:AbstractModel}
 	Y::AbstractVector{T}
 	imsize::Tuple{Int, Int}
 	aug::Augmentor.Pipeline
+	fitresult::FitResult
 end;
 
 # ╔═╡ 0d31317a-9555-428a-8151-709cb2a3d7c6
 function machine(m::AbstractModel, X, Y; imsize=(256, 256), aug=nothing)
 	# Validate Types
-	validate_model_types(m, X, Y)
+	validate_model(m, X, Y)
 	
 	# Construct Default Augmentor
 	aug = isnothing(aug) ? Augmentor.ImmutablePipeline(NoOp()) : aug
 	
 	# Return Machine
-	return Machine(m, X, Y, imsize, aug)
+	return Machine(m, X, Y, imsize, aug, FitResult())
 end;
+
+# ╔═╡ 68251bbc-6c3d-4eb2-8046-0d9b88bac86d
+md"""
+# Define Training Algorithm
+"""
+
+# ╔═╡ 141a6e81-6c12-446f-b235-95c3ee9d85b8
+function fit_predictor(predictor, model::AbstractClassifier, train, validation)
+	# Define Loss Function
+	loss(x, y) = Flux.Losses.crossentropy(predictor(x), y)
+
+	# Define Optimizer
+	opt = Flux.Optimise.Optimiser(Flux.WeightDecay(model.λ) ,Flux.ADAM(model.η))
+
+	# Get Params
+	params = model.fine_tune ? Flux.params(predictor[1:end-1]) : Flux.params(predictor[end-1])
+
+	# Train For Specified Number Of Epochs
+	learning_curve = Float32[]
+	validation_curve = Float32[]
+	for epoch in 1:model.epochs
+		
+		# Train Model
+		Flux.train!(loss, params, train, opt)
+
+		# Evaluate On Training Data
+		push!(learning_curve, mean(loss(x, y) for (x, y) in train) |> Float32)
+
+		# Evaluate On Validation Data
+		push!(validation_curve, mean(loss(x, y) for (x, y) in validation) |> Float32)
+		
+	end
+
+	return predictor, learning_curve, validation_curve
+	
+end;
+
+# ╔═╡ 0cc82ceb-51f5-40c2-a2aa-6af6a206f5f4
+md"""
+# Test
+"""
+
+# ╔═╡ 47a9bfb7-2ab1-46f2-a2cb-b50acadf254b
+begin
+	X, Y = get_data("../data", ["cat", "dog"], RGBImage)
+	model = ResNetClassifier(epochs=2)
+	mach = machine(model, X, Y, imsize=(64, 64))
+end;
+
+# ╔═╡ 303ecf54-e851-46c5-943f-0b57247f79c5
+let
+	img = load_image(X[100])
+	mask =load_image(X[101])
+	
+
+	aug = FlipX(0.5) |> FlipY(0.5) |> Rotate90(0.25)
+
+	#@time img2, mask2 = augment_data(img, mask, aug)
+#
+	
+	#img = @pipe join_slices(img...) |> permutedims(_, (3, 2, 1)) |> colorview(RGB, _)
+	#mask = @pipe join_slices(mask...) |> permutedims(_, (3, 2, 1)) |> colorview(RGB, _)
+	#img2 = @pipe permutedims(img2, (3, 2, 1)) |> colorview(RGB, _)
+	#mask2 = @pipe permutedims(mask2, (3, 2, 1)) |> colorview(RGB, _)
+
+	#mosaicview([img2, mask2]; fillvalue=1.0, npad=15, ncol=2, rowmajor=true)
+
+	d = DataPipeline(X, Y, (64, 64), aug)
+
+	@time x, y = d[1:32]
+	
+end
 
 # ╔═╡ b23313a3-6e47-4607-9458-a91367405dce
 function fit!(
@@ -224,8 +375,6 @@ function fit!(
 	# Retrieve Hyperparameters
 	sz = machine.imsize
 	aug = machine.aug
-	epochs = machine.model.epochs
-	η = machine.model.η
 
 	# Get Training Data
 	X_train = machine.X[train]
@@ -245,169 +394,96 @@ function fit!(
 	val_pipeline = DataPipeline(X_val, Y_val, sz)
 	val_data = Flux.DataLoader(val_pipeline, batchsize=32, shuffle=true)
 
-	# Get Model
-	model = construct_classifier(machine.model, length(levels(Y_train))) |> gpu
+	# Get Predictor And Initialize FitResult
+	pred = if isnothing(machine.fitresult.predictor)
+		p = construct_predictor(machine.model) |> Flux.gpu
 
-	# Define Loss Function
-	loss(x, y) = Flux.Losses.crossentropy(model(x), y)
+		loss(x, y) = Flux.Losses.crossentropy(p(x), y)
+		
+		@pipe mean(loss(x, y) for (x, y) in train_data) |>
+		Float32 |>
+		push!(machine.fitresult.learning_curve, _)
 
-	# Define Optimizer
-	opt = Flux.Optimise.ADAM(η)
+		@pipe mean(loss(x, y) for (x, y) in val_data) |>
+		Float32 |>
+		push!(machine.fitresult.validation_curve, _)
 
-	# Get Params
-	params = Flux.params(model[end-1])
-
-	# Train For Two Epochs
-	for epoch in 1:epochs
-		Flux.train!(loss, params, train_data, opt)
+		p
+	
+	else
+		machine.fitresult.predictor
 	end
+		
+	# Fit Predictor
+	pred, l_curve, v_curve = fit_predictor(pred, model, train_data, val_data)
 
-	return train_data, test_data, val_data, m
-	
-	
+	# Update FitResult
+	machine.fitresult.predictor = pred
+	machine.fitresult.train = train
+	machine.fitresult.test = test
+	machine.fitresult.val = val
+	push!(machine.fitresult.learning_curve, l_curve...)
+	push!(machine.fitresult.validation_curve, v_curve...)
 end;
 
-# ╔═╡ b123a596-85c9-4815-8ebf-228a44beb19e
+# ╔═╡ 176c6664-3188-4ed4-b0c3-722290393166
 let
-	
-	# Load Data
-	X, Y = get_data("../data", DirectoryLabel(["cat", "dog"]), Image)
-	X, Y = get_data("../data", DirectoryLabel(["cat", "dog"]), Image)
+	img = load_image(X[101])
 
-	# Create Machine
-	machine = machine(ResNetClassifier(), X, Y)
+	aug = FlipX(0.5) |> FlipY(0.5) |> Rotate90(0.25)
+	aug = aug |> Resize(height=64, width=64)
 
-	# Fit Machine
-	train, test, val, m = fit!(machine, 1:100, 101:200, 201:300)
+	img, y = augment_data(img, load_label(categorical(["cat"])[1]), aug)
 
-	for (x, y) in train
-		println("$(size(x))  $(size(y))")
-	end
-
-	m
+	img = @pipe permutedims(img, (3, 2, 1)) |> colorview(RGB, _)	
 end
 
-# ╔═╡ d799c5fe-0e09-4b8a-be5e-b2dbc68d270e
-struct GrayImage <: AbstractImage
-	src::String
-end
-
-# ╔═╡ 5386808c-0c55-4e26-969f-cbf89933fa33
-function n_channels(::Type{GrayImage})
-	return 1
-end;
-
-# ╔═╡ 877ba141-ee39-4564-b773-e704371c2001
-function load_data(img::GrayImage)
-	load(img.src) .|> Gray
-end;
-
-# ╔═╡ 5caf600a-3da4-4bf9-9901-aa7a59c7742f
+# ╔═╡ b189c72b-9c2e-4bc3-8070-ff7d0db22dd4
 begin
-	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, aug=NoOp())
-		sample = Random.randperm(length(X))[1:16]
-		@pipe load_data.(X[sample], Y[sample]) |> 
-		map(x->x[1], _) |>
-		map(x->augment(x, aug), _) |>
-		map(x->imresize(x, (256, 256)), _) |>
-		mosaicview(_; fillvalue=1.0, npad=15, ncol=4, rowmajor=true) |> 
-		plot(_, axis=nothing, showaxis=true, margin=0Plots.mm, size=(2000, 2000))
-	end
+function accuracy(ŷ::Matrix{<:AbstractFloat}, y::Matrix{<:AbstractFloat})
+	accuracy(Flux.onecold(ŷ), Flux.onecold(y))
+end
 
-	function plot_sample(X::AbstractVector{<:AbstractImage}, Y::CategoricalVector, dst::String, aug=NoOp())
-		plt = plot_sample(X, Y, aug)
-		savefig(plt, dst)
-		return plt
-	end
-end;
+function accuracy(ŷ::Vector, y::Vector)
+	return mean(ŷ .== y)
+end
+end
 
-# ╔═╡ f7210027-d1cc-4773-bb6c-de1c519c0172
+# ╔═╡ a6dac937-f0b5-4e5d-9e81-a1bc34fa3e5e
+function evaluate(machine, metric, rows)
+	
+	
+
+	# Get Training Data
+	aug = machine.aug
+	sz = machine.imsize
+	pipeline = DataPipeline(machine.X[rows], machine.Y[rows], sz, aug)
+	data = Flux.DataLoader(pipeline, batchsize=32, shuffle=false)
+	
+
+	yŷ = [(machine.fitresult.predictor(x), y) for (x, y) in data]
+	y = cat(map(x->x[2], yŷ)..., dims=2)
+	ŷ = cat(map(x->x[1], yŷ)..., dims=2)
+	accuracy(ŷ, y)
+	#y = map(x->x[1] for)
+end
+
+# ╔═╡ 07f611d2-b400-496e-8e96-6f32300d3ce0
+evaluate(mach, identity, mach.fitresult.train)
+
+# ╔═╡ 478a9815-76ac-4a9d-ba9c-324c574c12c8
 begin
-	function Base.getindex(X::DataPipeline{I}, i::AbstractArray{Int}) where {I}
-		imgs = X.imgs[i]
-		labels = X.labels[i]
-		nclasses = levels(X.labels) |> length
-    	xs = zeros(Float32, (X.size..., n_channels(I), length(i)))
-		ys = zeros(Float32, (nclasses, length(i)))
-    	@Threads.threads for idx in 1:length(i)
-			img = imgs[idx]
-			label = labels[idx]
-			x, y = @pipe load_data(img, label) |> preprocess_data(_..., X.aug, X.size)
-        	xs[:,:,:,idx] .= x
-			ys[:,idx] .= y
-    	end
-    	return xs |> gpu, ys |> gpu
-	end
-
-	function Base.getindex(X::DataPipeline, i::Int)
-		return X[[i]]
-	end
-end;
-
-# ╔═╡ 9676bdd1-d7f7-4066-812b-05d7e96ed12b
-md"""
-# Data Loading
-"""
-
-# ╔═╡ 788f598c-cec7-4fb6-bbc9-43b5c3018469
-md"""
-# Data Processing
-"""
-
-# ╔═╡ c18e2282-5489-4b96-bfbf-4596d6ed6c0c
-md"""
-# Define Pipeline
-"""
-
-# ╔═╡ 9a62027c-16ba-40ca-9ce5-5049d7e2e553
-md"""
-# Define Model
-"""
-
-# ╔═╡ 1c96d9b4-dfa4-4980-8ddc-0398403144aa
-md"""
-# Define Machine
-"""
-
-# ╔═╡ 68251bbc-6c3d-4eb2-8046-0d9b88bac86d
-md"""
-# Define Training Algorithm
-"""
-
-# ╔═╡ 0cc82ceb-51f5-40c2-a2aa-6af6a206f5f4
-md"""
-# Test 1: Creating A New Image Type
-"""
-
-# ╔═╡ d7e8a71e-270b-455c-a391-52dc6c88ad85
-let
-	X, Y = get_data("../data", DirectoryLabel(["cat", "dog"]), GrayImage)
-	img, l = load_data(X[100], Y[100])
-	d = DataPipeline(X, Y, (256, 256))
-	d[1]
-
-	plot_sample(X, Y)
+	rows = Random.randperm(length(X))[1:1000]
+	fit!(mach, rows[1:700], rows[701:900], rows[901:1000])
 end
 
-# ╔═╡ 4bd3edc0-2e60-4968-98cd-90898fba3d86
-md"""
-# Test 2: Construct Machine
-"""
+# ╔═╡ 29b63836-56a9-4f58-a3ce-d3ee08385214
+mach.fitresult
 
-# ╔═╡ 00bd8ba9-8cdc-466e-94d1-925fa3c3ab44
+# ╔═╡ 4c4df52d-d0b3-4419-bd83-e0829653b633
 let
-	X, Y = get_data("../data", DirectoryLabel(["cat", "dog"]), Image)
-	m = ResNetClassifier()
-	validate_model_types(m, X, Y)
-end
-
-# ╔═╡ 1d2cfb1d-7f79-4cca-a6ef-1fb5475b96e8
-let
-	# Load Data
-	X, Y = get_data("../data", DirectoryLabel(["cat", "dog"]), Image)
-
-	# Create Machine
-	machine = machine(ResNetClassifier(), X, Y) |> typeof
+	img = load("../data/cat/cat.100.jpg")
+	float32(img)
 end
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
@@ -422,6 +498,7 @@ Metalhead = "dbeba491-748d-5e0e-a39e-b530a07fa0cc"
 Pipe = "b98c9c47-44ae-5843-9183-064241ee97a0"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [compat]
 Augmentor = "~0.6.6"
@@ -431,7 +508,7 @@ Flux = "~0.13.4"
 Images = "~0.24.1"
 Metalhead = "~0.7.3"
 Pipe = "~1.3.0"
-Plots = "~1.38.2"
+Plots = "~1.38.4"
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000002
@@ -448,10 +525,10 @@ uuid = "621f4979-c628-5d54-868e-fcf4e3e8185c"
 version = "1.2.1"
 
 [[deps.Accessors]]
-deps = ["Compat", "CompositionsBase", "ConstructionBase", "Dates", "InverseFunctions", "LinearAlgebra", "MacroTools", "Requires", "Test"]
-git-tree-sha1 = "3fa8cc751763c91a5ea33331e523221009cb1e6f"
+deps = ["Compat", "CompositionsBase", "ConstructionBase", "Dates", "InverseFunctions", "LinearAlgebra", "MacroTools", "Requires", "StaticArrays", "Test"]
+git-tree-sha1 = "b9661b900b50ba475145b311a9a0ef9d2a9c85ea"
 uuid = "7d9f7c33-5ae7-4f3b-8dc6-eff91059b697"
-version = "0.1.23"
+version = "0.1.26"
 
 [[deps.Adapt]]
 deps = ["LinearAlgebra"]
@@ -468,16 +545,16 @@ version = "2.3.0"
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
 
 [[deps.ArrayInterface]]
-deps = ["ArrayInterfaceCore", "Compat", "IfElse", "LinearAlgebra", "Static"]
-git-tree-sha1 = "6d0918cb9c0d3db7fe56bea2bc8638fc4014ac35"
+deps = ["ArrayInterfaceCore", "Compat", "IfElse", "LinearAlgebra", "SnoopPrecompile", "Static"]
+git-tree-sha1 = "dedc16cbdd1d32bead4617d27572f582216ccf23"
 uuid = "4fba245c-0d91-5ea0-9b3e-6abc04ee57a9"
-version = "6.0.24"
+version = "6.0.25"
 
 [[deps.ArrayInterfaceCore]]
-deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse"]
-git-tree-sha1 = "14c3f84a763848906ac681f94cf469a851601d92"
+deps = ["LinearAlgebra", "SnoopPrecompile", "SparseArrays", "SuiteSparse"]
+git-tree-sha1 = "e5f08b5689b1aad068e01751889f2f615c7db36d"
 uuid = "30b0a656-2188-435a-8636-2ec0e6a096e2"
-version = "0.1.28"
+version = "0.1.29"
 
 [[deps.Artifacts]]
 uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
@@ -579,15 +656,15 @@ version = "1.15.7"
 
 [[deps.ChangesOfVariables]]
 deps = ["ChainRulesCore", "LinearAlgebra", "Test"]
-git-tree-sha1 = "38f7a08f19d8810338d4f5085211c7dfa5d5bdd8"
+git-tree-sha1 = "844b061c104c408b24537482469400af6075aae4"
 uuid = "9e997f8a-9a97-42d5-a9f1-ce6bfc15e2c0"
-version = "0.1.4"
+version = "0.1.5"
 
 [[deps.CodecZlib]]
 deps = ["TranscodingStreams", "Zlib_jll"]
-git-tree-sha1 = "ded953804d019afa9a3f98981d99b33e3db7b6da"
+git-tree-sha1 = "9c209fb7536406834aa938fb149964b985de6c83"
 uuid = "944b1d66-785c-5afd-91f1-9de20f533193"
-version = "0.7.0"
+version = "0.7.1"
 
 [[deps.ColorSchemes]]
 deps = ["ColorTypes", "ColorVectorSpace", "Colors", "FixedPointNumbers", "Random", "SnoopPrecompile"]
@@ -792,9 +869,9 @@ uuid = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 
 [[deps.FillArrays]]
 deps = ["LinearAlgebra", "Random", "SparseArrays", "Statistics"]
-git-tree-sha1 = "9a0472ec2f5409db243160a8b030f94c380167a3"
+git-tree-sha1 = "d3ba08ab64bdfd27234d3f61956c966266757fe6"
 uuid = "1a297f60-69ca-5386-bcde-b61e274b549b"
-version = "0.13.6"
+version = "0.13.7"
 
 [[deps.FixedPointNumbers]]
 deps = ["Statistics"]
@@ -866,9 +943,9 @@ version = "3.3.8+0"
 
 [[deps.GPUArrays]]
 deps = ["Adapt", "GPUArraysCore", "LLVM", "LinearAlgebra", "Printf", "Random", "Reexport", "Serialization", "Statistics"]
-git-tree-sha1 = "5ae0f2ab6f6d99d558cb588763f76311106c71b1"
+git-tree-sha1 = "4dfaff044eb2ce11a897fecd85538310e60b91e6"
 uuid = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
-version = "8.6.0"
+version = "8.6.2"
 
 [[deps.GPUArraysCore]]
 deps = ["Adapt"]
@@ -884,15 +961,15 @@ version = "0.17.1"
 
 [[deps.GR]]
 deps = ["Artifacts", "Base64", "DelimitedFiles", "Downloads", "GR_jll", "HTTP", "JSON", "Libdl", "LinearAlgebra", "Pkg", "Preferences", "Printf", "Random", "Serialization", "Sockets", "TOML", "Tar", "Test", "UUIDs", "p7zip_jll"]
-git-tree-sha1 = "387d2b8b3ca57b791633f0993b31d8cb43ea3292"
+git-tree-sha1 = "9e23bd6bb3eb4300cb567bdf63e2c14e5d2ffdbc"
 uuid = "28b8d3ca-fb5f-59d9-8090-bfdbd6d07a71"
-version = "0.71.3"
+version = "0.71.5"
 
 [[deps.GR_jll]]
 deps = ["Artifacts", "Bzip2_jll", "Cairo_jll", "FFMPEG_jll", "Fontconfig_jll", "GLFW_jll", "JLLWrappers", "JpegTurbo_jll", "Libdl", "Libtiff_jll", "Pixman_jll", "Pkg", "Qt5Base_jll", "Zlib_jll", "libpng_jll"]
-git-tree-sha1 = "5982b5e20f97bff955e9a2343a14da96a746cd8c"
+git-tree-sha1 = "aa23c9f9b7c0ba6baeabe966ea1c7d2c7487ef90"
 uuid = "d2c73de3-f751-5644-a686-071e5b155ba9"
-version = "0.71.3+0"
+version = "0.71.5+0"
 
 [[deps.Gettext_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "Libiconv_jll", "Pkg", "XML2_jll"]
@@ -931,9 +1008,9 @@ version = "1.0.2"
 
 [[deps.HTTP]]
 deps = ["Base64", "CodecZlib", "Dates", "IniFile", "Logging", "LoggingExtras", "MbedTLS", "NetworkOptions", "OpenSSL", "Random", "SimpleBufferStream", "Sockets", "URIs", "UUIDs"]
-git-tree-sha1 = "eb5aa5e3b500e191763d35198f859e4b40fff4a6"
+git-tree-sha1 = "37e4657cd56b11abe3d10cd4a1ec5fbdb4180263"
 uuid = "cd3eb016-35fb-5094-929b-558a96fad6f3"
-version = "1.7.3"
+version = "1.7.4"
 
 [[deps.HarfBuzz_jll]]
 deps = ["Artifacts", "Cairo_jll", "Fontconfig_jll", "FreeType2_jll", "Glib_jll", "Graphite2_jll", "JLLWrappers", "Libdl", "Libffi_jll", "Pkg"]
@@ -1253,9 +1330,9 @@ uuid = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 
 [[deps.LogExpFunctions]]
 deps = ["ChainRulesCore", "ChangesOfVariables", "DocStringExtensions", "InverseFunctions", "IrrationalConstants", "LinearAlgebra"]
-git-tree-sha1 = "946607f84feb96220f480e0422d3484c49c00239"
+git-tree-sha1 = "45b288af6956e67e621c5cbb2d75a261ab58300b"
 uuid = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
-version = "0.3.19"
+version = "0.3.20"
 
 [[deps.Logging]]
 uuid = "56ddb016-857b-54e1-b83d-db4d58db5568"
@@ -1357,9 +1434,9 @@ uuid = "14a3606d-f60d-562e-9121-12d972cd8159"
 
 [[deps.NNlib]]
 deps = ["Adapt", "ChainRulesCore", "LinearAlgebra", "Pkg", "Random", "Requires", "Statistics"]
-git-tree-sha1 = "03541c7a6dc3010cb2e33a01295f3cd35b5fd41e"
+git-tree-sha1 = "e69bf048c892296a45083f0abab02ee8cffe1378"
 uuid = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
-version = "0.8.15"
+version = "0.8.17"
 
 [[deps.NNlibCUDA]]
 deps = ["Adapt", "CUDA", "LinearAlgebra", "NNlib", "Random", "Statistics"]
@@ -1390,9 +1467,9 @@ uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
 
 [[deps.OffsetArrays]]
 deps = ["Adapt"]
-git-tree-sha1 = "f71d8950b724e9ff6110fc948dff5a329f901d64"
+git-tree-sha1 = "82d7c9e310fe55aa54996e6f7f94674e2a38fcb4"
 uuid = "6fe1bfb0-de20-5000-8ca7-80f57d26f881"
-version = "1.12.8"
+version = "1.12.9"
 
 [[deps.Ogg_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1467,9 +1544,9 @@ version = "0.12.3"
 
 [[deps.Parsers]]
 deps = ["Dates", "SnoopPrecompile"]
-git-tree-sha1 = "8175fc2b118a3755113c8e68084dc1a9e63c61ee"
+git-tree-sha1 = "151d91d63d8d6c1a5789ecb7de51547e00480f1b"
 uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
-version = "2.5.3"
+version = "2.5.4"
 
 [[deps.Pipe]]
 git-tree-sha1 = "6842804e7867b115ca9de748a0cf6b364523c16d"
@@ -1494,15 +1571,15 @@ version = "3.1.0"
 
 [[deps.PlotUtils]]
 deps = ["ColorSchemes", "Colors", "Dates", "Printf", "Random", "Reexport", "SnoopPrecompile", "Statistics"]
-git-tree-sha1 = "5b7690dd212e026bbab1860016a6601cb077ab66"
+git-tree-sha1 = "c95373e73290cf50a8a22c3375e4625ded5c5280"
 uuid = "995b91a9-d308-5afd-9ec6-746e21dbc043"
-version = "1.3.2"
+version = "1.3.4"
 
 [[deps.Plots]]
 deps = ["Base64", "Contour", "Dates", "Downloads", "FFMPEG", "FixedPointNumbers", "GR", "JLFzf", "JSON", "LaTeXStrings", "Latexify", "LinearAlgebra", "Measures", "NaNMath", "Pkg", "PlotThemes", "PlotUtils", "Preferences", "Printf", "REPL", "Random", "RecipesBase", "RecipesPipeline", "Reexport", "RelocatableFolders", "Requires", "Scratch", "Showoff", "SnoopPrecompile", "SparseArrays", "Statistics", "StatsBase", "UUIDs", "UnicodeFun", "Unzip"]
-git-tree-sha1 = "a99bbd3664bb12a775cda2eba7f3b2facf3dad94"
+git-tree-sha1 = "87036ff7d1277aa624ce4d211ddd8720116f80bf"
 uuid = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
-version = "1.38.2"
+version = "1.38.4"
 
 [[deps.Preferences]]
 deps = ["TOML"]
@@ -2067,18 +2144,16 @@ version = "1.4.1+0"
 # ╠═d8fb1e41-93d5-41ba-ae54-eccf38da28e9
 # ╠═ba5ebf0c-f6cc-4dfc-83a0-c48b8e54aa01
 # ╠═bf6d61ed-5538-4a63-b03e-6e0ab7ebf651
+# ╠═0d1e373d-fee6-4fd9-b2bf-095c482adb62
+# ╠═0b9c6bc6-9b44-4f64-a240-a6b7f70c7658
+# ╠═8ef43f36-1eca-4067-95c5-8750603096aa
 # ╟─9676bdd1-d7f7-4066-812b-05d7e96ed12b
-# ╠═a8f7cd6f-dfb9-468c-aace-acd048a5bcb9
+# ╠═914c9bd7-941f-4198-a211-16cda8e57e88
+# ╠═c44c4efc-5ee0-49cf-9f90-358b42c234e6
+# ╠═d36eb105-076e-48db-8329-a8af50c31b16
+# ╠═75d7a895-34c6-49c0-8e03-7f0479f3e657
 # ╠═ff3e0e17-43e5-4594-842c-53330a015473
-# ╠═42661d75-e5f8-4078-a7c8-cb67ed67149b
-# ╠═47a9bfb7-2ab1-46f2-a2cb-b50acadf254b
-# ╠═a42a470b-0f5b-4cf8-8ce8-252ce5f0aabb
-# ╟─788f598c-cec7-4fb6-bbc9-43b5c3018469
-# ╠═0202fab0-a589-415b-a819-d474a95f3f00
-# ╠═7f052983-5e53-4d20-a34d-61cbfac31188
-# ╠═97f2a69d-de48-4045-8d2f-e1059a57635b
-# ╠═8f07e284-72f9-4e09-ad0e-1227bc0e71be
-# ╠═2862610e-8589-4b88-866b-1cd951b01b9b
+# ╠═303ecf54-e851-46c5-943f-0b57247f79c5
 # ╠═5caf600a-3da4-4bf9-9901-aa7a59c7742f
 # ╟─c18e2282-5489-4b96-bfbf-4596d6ed6c0c
 # ╠═53234c80-512d-4be2-9bfd-5c9ad953a91b
@@ -2087,23 +2162,24 @@ version = "1.4.1+0"
 # ╟─9a62027c-16ba-40ca-9ce5-5049d7e2e553
 # ╠═9de6e4bb-156d-483c-87af-11ba9bb4f7da
 # ╠═64d257df-b013-41eb-bbd4-2394729c5d92
-# ╠═8673e94b-bab3-42fe-bb42-b71ef78cd5a1
+# ╠═f15a5f1f-6668-4e0e-afb9-eb54eeadb37c
 # ╠═967ef01c-3a39-4ecd-ad1e-3f2b52ae72ff
-# ╠═b4a4427c-5111-4547-9929-df1488545e2c
-# ╠═5a6e55ae-6448-43fa-ac5e-f27d6d94b002
+# ╠═8673e94b-bab3-42fe-bb42-b71ef78cd5a1
 # ╟─1c96d9b4-dfa4-4980-8ddc-0398403144aa
+# ╠═e9998c93-7eeb-441e-8ddd-722434bb174c
 # ╠═a1d98405-61db-4f03-8169-0ad2e95659bb
 # ╠═0d31317a-9555-428a-8151-709cb2a3d7c6
 # ╟─68251bbc-6c3d-4eb2-8046-0d9b88bac86d
+# ╠═141a6e81-6c12-446f-b235-95c3ee9d85b8
 # ╠═b23313a3-6e47-4607-9458-a91367405dce
-# ╠═b123a596-85c9-4815-8ebf-228a44beb19e
 # ╟─0cc82ceb-51f5-40c2-a2aa-6af6a206f5f4
-# ╠═d799c5fe-0e09-4b8a-be5e-b2dbc68d270e
-# ╠═5386808c-0c55-4e26-969f-cbf89933fa33
-# ╠═877ba141-ee39-4564-b773-e704371c2001
-# ╠═d7e8a71e-270b-455c-a391-52dc6c88ad85
-# ╟─4bd3edc0-2e60-4968-98cd-90898fba3d86
-# ╠═00bd8ba9-8cdc-466e-94d1-925fa3c3ab44
-# ╠═1d2cfb1d-7f79-4cca-a6ef-1fb5475b96e8
+# ╠═176c6664-3188-4ed4-b0c3-722290393166
+# ╠═47a9bfb7-2ab1-46f2-a2cb-b50acadf254b
+# ╠═b189c72b-9c2e-4bc3-8070-ff7d0db22dd4
+# ╠═a6dac937-f0b5-4e5d-9e81-a1bc34fa3e5e
+# ╠═07f611d2-b400-496e-8e96-6f32300d3ce0
+# ╠═478a9815-76ac-4a9d-ba9c-324c574c12c8
+# ╠═29b63836-56a9-4f58-a3ce-d3ee08385214
+# ╠═4c4df52d-d0b3-4419-bd83-e0829653b633
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
