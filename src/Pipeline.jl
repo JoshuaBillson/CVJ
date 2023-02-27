@@ -26,21 +26,8 @@ end
 struct DataPipeline{I<:AbstractImage, L}
     imgs::AbstractVector{I}
     labels::AbstractVector{L}
-    aug::Augmentor.Pipeline
-end
-
-"""
-    DataPipeline(imgs, labels, sz, p_flipx, p_flipy, p_rotate)
-
-Construct a data pipeline from the given images and labels. 
-
-Images/masks will be resized to the resolution specified by sz. 
-
-p_flipx, p_flipy, and p_ratate denote the probability that the given operations will be applied during augmentation.
-"""
-function DataPipeline(i::AbstractVector{I}, l::AbstractVector{L}, sz::Tuple{Int, Int}, p_flipx, p_flipy, p_rotate) where {I <:AbstractImage, L}
-    aug = FlipX(p_flipx) |> FlipY(p_flipy) |> Rotate90(p_rotate) |> Resize(sz)
-    DataPipeline(i, l, aug)
+    sz::Tuple{Int, Int}
+    split::Symbol
 end
 
 """
@@ -52,50 +39,21 @@ function n_channels(t::Type{<:AbstractImage})
     return 3
 end
 
-"""
-    load_image(img)
-
-Read an image into a 3-dimensional Float32 array. 
-
-Must be implemented for all AbstractImage types.
-"""
-function load_image(img::AbstractImage)::Array{Float32, 3}
-    return load(img.src) |> image_to_tensor
-end
-
-"Read a label into a Float32 Array."
-function load_mask(l::AbstractMask)
-    @pipe load(l.src) |>
-    channelview |>
-    permutedims(_, (2, 1)) |>
-    rawview |>
-    Matrix |>
-    one_hot_mask(_, l.classes)
-end
-
 "Read a label into a Float32 Array."
 function n_classes(l::Type{T}) where {T <: AbstractMask}
     error("Error: You forgot to implement n_classes(mask_type) for type $(T)!")
 end
 
-function load_data(xs::Vector{I}, ys::CategoricalVector, aug, sz) where {I <: AbstractImage}
-    x_dst = zeros(Float32, (sz..., n_channels(I), length(xs)))
-    y_dst = Flux.onehotbatch(ys, levels(ys)) .|> Float32
-    @Threads.threads for idx in 1:length(xs)
-        x_dst[:,:,:,idx] .= @pipe load_image(xs[idx]) |> augment_data(_, aug)
-    end
-    return x_dst, y_dst
+function load_data(x::AbstractImage, y::CategoricalValue, sz::Tuple{Int, Int}, split::Symbol)
+    x = @pipe load(x.src) |> imresize(_, sz) |> image_to_tensor(_)
+    y = Flux.onehot(y, levels(y)) .|> Float32
+    return x, y
 end
 
-function load_data(xs::Vector{I}, ys::Vector{M}, aug, sz) where {I <: AbstractImage, M <: AbstractMask}
-    x_dst = zeros(Float32, (sz..., n_channels(I), length(i)))
-    y_dst = zeros(Float32, (sz..., n_classes(M), length(i)))
-    @Threads.threads for idx in 1:length(xs)
-        x, y = augment_data(load_image(xs[idx]), load_mask(ys[idx]), aug)
-        x_dst[:,:,:,idx] .= x 
-        y_dst .= y
-    end
-    return x_dst, y_dst
+function load_data(x::AbstractImage, y::AbstractMask, sz::Tuple{Int, Int}, split::Symbol)
+    x = @pipe load(x.src) |> imresize(_, sz) |> image_to_tensor(_)
+    y = Flux.onehot(y, levels(y)) .|> Float32
+    return x, y
 end
 
 function Base.length(X::DataPipeline)
@@ -103,8 +61,16 @@ function Base.length(X::DataPipeline)
 end
 
 function Base.getindex(X::DataPipeline{I, <:CategoricalValue}, i::AbstractArray{Int}) where {I}
-    xs, ys = load_data(X.imgs[i], X.labels[i], X.aug, X.aug.operations[end].size)
-    return xs |> Flux.gpu, ys |> Flux.gpu
+    imgs = X.imgs[i]
+    labels = X.labels[i]
+    x_dst = zeros(Float32, (X.sz..., n_channels(I), length(i)))
+    y_dst = zeros(Float32, (length(levels(labels)), length(i)))
+    @Threads.threads for idx in 1:length(imgs)
+        x, y = load_data(imgs[idx], labels[idx], X.sz, X.split)
+        x_dst[:,:,:,idx] .= x 
+        y_dst[:,idx] .= y
+    end
+    return x_dst |> Flux.gpu, y_dst |> Flux.gpu
 end
 
 function Base.getindex(X::DataPipeline, i::Int)
@@ -151,11 +117,11 @@ function image_to_tensor(img::Array{<:Gray, 2})::Array{Float32, 3}
     return @pipe reshape(x, size(x)..., 1) |> permutedims(_, (3, 2, 1))
 end
 
-function get_images(src::String, ::Type{T}) where {T <: AbstractImage}
+function get_images(src::String, ext::String, ::Type{T}) where {T <: AbstractImage}
     imgs = []
     for (root, dirs, files) in walkdir(src)
         for file in files
-            if contains(file, ".jpg")
+            if contains(file, ".$ext")
                 push!(imgs, "$root/$file")
             end
         end

@@ -21,15 +21,12 @@ struct Machine{M<:AbstractModel, I<:AbstractImage, L}
 	X::Vector{I}
 	Y::AbstractVector{L}
 	imsize::Tuple{Int, Int}
-    p_flipx::Float64
-    p_flipy::Float64
-    p_rotate::Float64
 	fitresult::FitResult
 end
 
-function Machine(model::AbstractModel, X, Y, imsize::Tuple{Int, Int}, p_flipx=0.5, p_flipy=0.5, p_rotate=0.25)
+function Machine(model::AbstractModel, X, Y, imsize::Tuple{Int, Int})
 	validate_model(model, X, Y)
-	Machine(model, X, Y, imsize, p_flipx, p_flipy, p_rotate, FitResult())
+	Machine(model, X, Y, imsize, FitResult())
 end
 
 function compile!(mach::Machine, train=0.65, test=0.20, val=0.15, rng=MersenneTwister(123))
@@ -52,17 +49,18 @@ function fit!(machine::Machine, epochs::Int; opt=Flux.Adam(), loss=Flux.crossent
 	# Get Train Data
 	trainX = machine.X[machine.fitresult.train]
 	trainY = machine.Y[machine.fitresult.train]
-	trainPipeline = DataPipeline(trainX, trainY, machine.imsize, machine.p_flipx, machine.p_flipy, machine.p_rotate)
+	trainPipeline = DataPipeline(trainX, trainY, machine.imsize, :train)
 	trainData = Flux.DataLoader(trainPipeline, batchsize=16, shuffle=true)
 
 	# Get Validation Data
 	valX = machine.X[machine.fitresult.val]
 	valY = machine.Y[machine.fitresult.val]
-	valPipeline = DataPipeline(valX, valY, machine.imsize, 0.0, 0.0, 0.0)
+	valPipeline = DataPipeline(valX, valY, machine.imsize, :val)
 	valData = Flux.DataLoader(valPipeline, batchsize=16, shuffle=false)
 
 	# Get Params
-	params = get_params(machine.model, machine.fitresult.predictor)
+	predictor = machine.fitresult.predictor |> Flux.gpu
+	params = get_params(machine.model, predictor)
 
 	# Iterate Over Epochs
 	for epoch in 1:epochs
@@ -73,7 +71,7 @@ function fit!(machine::Machine, epochs::Int; opt=Flux.Adam(), loss=Flux.crossent
 		for (i, (x, y)) in enumerate(iter)
 
 			# Compute Gradient
-			l, grads = Flux.withgradient(() -> loss(machine.fitresult.predictor(x), y), params)
+			l, grads = Flux.withgradient(() -> loss(predictor(x), y), params)
 
 			# Update Params
 			Flux.update!(opt, params, grads)
@@ -84,24 +82,31 @@ function fit!(machine::Machine, epochs::Int; opt=Flux.Adam(), loss=Flux.crossent
 
 		end
 	end
+
+	machine.fitresult.predictor = predictor |> Flux.cpu
 end
 
-function evaluate(machine::Machine, metric, split=:test)
+function evaluate(machine::Machine, metrics::Vector, split=:test)
 	# Get Evaluation Data
 	@assert split in [:test, :train, :val] "Error: Split must be one of (:test, :train, :val)!"
 	splits = Dict(:test => machine.fitresult.test, :train => machine.fitresult.train, :val => machine.fitresult.val)
 	X = machine.X[splits[split]]
 	Y = machine.Y[splits[split]]
-	pipeline = DataPipeline(X, Y, machine.imsize, 0.0, 0.0, 0.0)
+	pipeline = DataPipeline(X, Y, machine.imsize, split)
 	data = Flux.DataLoader(pipeline, batchsize=16, shuffle=false)
 
 	# Get Predictions
-	predictions = [(machine.fitresult.predictor(x), y) for (x, y) in data]
+	predictor = machine.fitresult.predictor |> Flux.gpu
+	predictions = [Flux.cpu.((predictor(x), y)) for (x, y) in data]
 	y = cat([y for (ŷ, y) in predictions]..., dims=2)
 	ŷ = cat([ŷ for (ŷ, y) in predictions]..., dims=2)
 	
 	# Return Evaluation
-	return metric(ŷ, y)
+	evals = Dict{Symbol, Float32}()
+	for metric in metrics
+		push!(evals, Symbol(metric) => metric(ŷ, y))
+	end
+	return evals
 
 end
 
